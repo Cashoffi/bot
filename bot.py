@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, UTC
 intents = discord.Intents.default()
 intents.message_content = True
 
-DISCORD_TOKEN = ""
+API_TOKEN = ""
 bot = commands.Bot(command_prefix='/', intents=intents)
 
 GUILD_ID = 1463456630833287304
@@ -434,7 +434,7 @@ async def owner_say(ctx, *, message: str):
     await ctx.message.delete()
     await ctx.send(message)
 
-token = os.getenv(DISCORD_TOKEN)
+token = os.getenv(API_TOKEN)
 if not token:
     print('ERROR: DISCORD_TOKEN environment variable is not set. Do not commit your token to git.')
 else:
