@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, UTC
 intents = discord.Intents.default()
 intents.message_content = True
 
-API_TOKEN = ""
+API_TOKEN = ''
 bot = commands.Bot(command_prefix='/', intents=intents)
 
 GUILD_ID = 1463456630833287304
