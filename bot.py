@@ -1,3 +1,4 @@
+GUILD_ID = 1463456630833287304  # <-- Укажите ваш ID сервера
 import glob
 import discord
 from discord import app_commands
