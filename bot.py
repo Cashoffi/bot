@@ -183,6 +183,14 @@ async def user_has_allowed_role(user: discord.abc.Snowflake, guild: discord.Guil
 @bot.event
 async def on_ready():
     print(f'Бот {bot.user} запущен!')
+    # Синхронизация команд
+    try:
+        guild = discord.Object(id=GUILD_ID)
+        await bot.tree.sync()
+        await bot.tree.sync(guild=guild)
+        print(f'Слэш-команды синхронизированы для сервера {GUILD_ID}')
+    except Exception as e:
+        print(f'Ошибка синхронизации команд: {e}')
     # Если перед перезапуском был записан файл с информацией — отправим уведомление
     try:
         restart_file = Path(__file__).parent / 'restart_info.json'
@@ -257,17 +265,12 @@ async def userinfo(interaction: discord.Interaction, member: discord.Member | No
         await interaction.response.send_message("Не удалось получить информацию о пользователе.", ephemeral=True)
         return
     joined = member.joined_at.strftime('%Y-%m-%d %H:%M:%S') if member.joined_at else 'N/A'
-    # Заглушка: подсчет сообщений (реализуйте хранение и подсчет в on_message)
-    try:
-        stats_path = Path(f"userstats_{member.id}.json")
-        if stats_path.exists():
-            stats = json.loads(stats_path.read_text())
-            msg_count = stats.get("messages", 0)
-            voice_seconds = stats.get("voice_seconds", 0)
-        else:
-            msg_count = 0
-            voice_seconds = 0
-    except Exception:
+    data = load_users_data()
+    uid = str(member.id)
+    if uid in data:
+        msg_count = data[uid].get("messages", 0)
+        voice_seconds = data[uid].get("voice_seconds", 0)
+    else:
         msg_count = 0
         voice_seconds = 0
     hours = round(voice_seconds / 3600, 2)
@@ -308,23 +311,20 @@ async def on_message(message: discord.Message):
 async def on_voice_state_update(member, before, after):
     if not member.guild or member.bot:
         return
-    stats_path = Path(f"userstats_{member.id}.json")
-    stats = {"messages": 0, "voice_seconds": 0}
-    if stats_path.exists():
-        try:
-            stats = json.loads(stats_path.read_text())
-        except Exception:
-            pass
+    data = load_users_data()
+    uid = str(member.id)
+    if uid not in data:
+        data[uid] = {"messages": 0, "voice_seconds": 0, "games": [], "_voice_join_time": None}
     # Вход в голосовой канал
     if before.channel is None and after.channel is not None:
-        stats["_voice_join_time"] = int(discord.utils.utcnow().timestamp())
+        data[uid]["_voice_join_time"] = int(discord.utils.utcnow().timestamp())
     # Выход из голосового канала
     elif before.channel is not None and after.channel is None:
-        join_time = stats.pop("_voice_join_time", None)
+        join_time = data[uid].pop("_voice_join_time", None)
         if join_time:
             now = int(discord.utils.utcnow().timestamp())
-            stats["voice_seconds"] = stats.get("voice_seconds", 0) + (now - join_time)
-    stats_path.write_text(json.dumps(stats))
+            data[uid]["voice_seconds"] = data[uid].get("voice_seconds", 0) + (now - join_time)
+    save_users_data(data)
 
 
 @bot.tree.command(name="say", description="Бот отправит сообщение от своего имени", guild=discord.Object(id=GUILD_ID))
@@ -350,16 +350,10 @@ async def top(interaction: discord.Interaction):
             await interaction.response.send_message("Эту команду можно использовать раз в 5 минут.", ephemeral=True)
             return
         last_top_call[user_id] = now
-    from glob import glob
-    stats_files = glob("userstats_*.json")
+    data = load_users_data()
     stats = []
-    for file in stats_files:
-        try:
-            data = json.loads(Path(file).read_text())
-            user_id_stat = int(file.split("_")[1].split(".")[0])
-            stats.append((user_id_stat, data.get("messages", 0)))
-        except Exception:
-            pass
+    for uid, info in data.items():
+        stats.append((int(uid), info.get("messages", 0)))
     stats.sort(key=lambda x: x[1], reverse=True)
     lines = []
     for i, (user_id_stat, count) in enumerate(stats[:10], 1):
@@ -388,16 +382,10 @@ async def voice_top(interaction: discord.Interaction):
             await interaction.response.send_message("Эту команду можно использовать раз в 5 минут.", ephemeral=True)
             return
         last_voice_top_call[user_id] = now
-    from glob import glob
-    stats_files = glob("userstats_*.json")
+    data = load_users_data()
     stats = []
-    for file in stats_files:
-        try:
-            data = json.loads(Path(file).read_text())
-            user_id_stat = int(file.split("_")[1].split(".")[0])
-            stats.append((user_id_stat, data.get("voice_seconds", 0)))
-        except Exception:
-            pass
+    for uid, info in data.items():
+        stats.append((int(uid), info.get("voice_seconds", 0)))
     stats.sort(key=lambda x: x[1], reverse=True)
     lines = []
     for i, (user_id_stat, seconds) in enumerate(stats[:10], 1):
@@ -420,16 +408,10 @@ async def voice_top(interaction: discord.Interaction):
 # Узнать своё место в топе по сообщениям
 @bot.tree.command(name="myrank", description="Ваше место в топе по сообщениям", guild=discord.Object(id=GUILD_ID))
 async def myrank(interaction: discord.Interaction):
-    from glob import glob
-    stats_files = glob("userstats_*.json")
+    data = load_users_data()
     stats = []
-    for file in stats_files:
-        try:
-            data = json.loads(Path(file).read_text())
-            user_id = int(file.split("_")[1].split(".")[0])
-            stats.append((user_id, data.get("messages", 0)))
-        except Exception:
-            pass
+    for uid, info in data.items():
+        stats.append((int(uid), info.get("messages", 0)))
     stats.sort(key=lambda x: x[1], reverse=True)
     user_id = interaction.user.id
     rank = next((i+1 for i, (uid, _) in enumerate(stats) if uid == user_id), None)
