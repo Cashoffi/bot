@@ -9,7 +9,83 @@ from datetime import datetime, timedelta, UTC
 intents = discord.Intents.default()
 intents.message_content = True
 
+intents.presences = True  # Важно для отслеживания активности
+intents.members = True    # Нужно для работы с ролями
 bot = commands.Bot(command_prefix='/', intents=intents)
+
+
+# === Настройки для отслеживания активности ===
+GAME_ROLE_MAP = {
+    "Dota 2": 1463643348345819381,
+    "Counter-Strike 2": 1463646558493868042,
+}
+ALLOWED_GAMES = set(GAME_ROLE_MAP.keys())
+IMMUTABLE_ROLE_IDS = set()  # Можно добавить GUILD_ID и другие важные роли
+HISTORY_DAYS = 7
+
+def get_history_path(user_id):
+    return Path(f"gamehistory_{user_id}.json")
+
+def prune_old_history(history):
+    now = datetime.now(UTC).timestamp()
+    return [entry for entry in history if now - entry[1] <= HISTORY_DAYS * 86400]
+
+@bot.event
+async def on_presence_update(before: discord.Member, after: discord.Member):
+    # Сохраняем историю игр
+    user_id = after.id
+    history_path = get_history_path(user_id)
+    now_ts = datetime.now(UTC).timestamp()
+    history = []
+    if history_path.exists():
+        try:
+            history = json.loads(history_path.read_text())
+        except Exception:
+            history = []
+    # Добавляем текущие игры
+    current_games = set()
+    if after.activities:
+        for activity in after.activities:
+            if isinstance(activity, discord.Game):
+                current_games.add(activity.name)
+                # Записываем только если новая игра
+                if not any(entry[0] == activity.name for entry in history):
+                    history.append([activity.name, now_ts])
+    # Очищаем старое
+    history = prune_old_history(history)
+    # Сохраняем историю
+    try:
+        history_path.write_text(json.dumps(history))
+    except Exception as e:
+        print(f"[on_presence_update] Ошибка записи истории: {e}")
+
+    # Проверяем, запускал ли пользователь только разрешённые игры за неделю
+    games_last_week = {entry[0] for entry in history}
+    if not games_last_week.issubset(ALLOWED_GAMES):
+        return  # Были другие игры — ничего не делаем
+
+    # Если сейчас запущена одна из целевых игр — выдаём роль
+    for game_name, role_id in GAME_ROLE_MAP.items():
+        if game_name in current_games:
+            guild = after.guild
+            if not guild:
+                return
+            role = guild.get_role(role_id)
+            if not role:
+                try:
+                    role = await guild.fetch_role(role_id)
+                except Exception:
+                    return
+            # Снимаем все роли, кроме IMMUTABLE_ROLE_IDS и нужной
+            roles_to_remove = [r for r in after.roles if r.id not in IMMUTABLE_ROLE_IDS and r != role]
+            try:
+                if roles_to_remove:
+                    await after.remove_roles(*roles_to_remove, reason=f"Запущена игра {game_name}")
+                if role not in after.roles:
+                    await after.add_roles(role, reason=f"Запущена игра {game_name}")
+            except Exception as e:
+                print(f"[on_presence_update] Ошибка при изменении ролей: {e}")
+            break
 
 GUILD_ID = 1463456630833287304
 # Разрешённые каналы для команд
@@ -127,19 +203,32 @@ async def userinfo(interaction: discord.Interaction, member: discord.Member | No
         f"Пользователь: {member}\nПрисоединился: {joined}\nСообщений: {msg_count}\nЧасов в голосе: {hours}",
         ephemeral=False
     )
+USERS_DATA_PATH = Path("users_data.json")
+
+def load_users_data():
+    if USERS_DATA_PATH.exists():
+        try:
+            return json.loads(USERS_DATA_PATH.read_text())
+        except Exception:
+            return {}
+    return {}
+
+def save_users_data(data):
+    try:
+        USERS_DATA_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(f"[users_data] Ошибка записи: {e}")
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.guild is None or message.author.bot:
         return
-    stats_path = Path(f"userstats_{message.author.id}.json")
-    stats = {"messages": 0, "voice_seconds": 0}
-    if stats_path.exists():
-        try:
-            stats = json.loads(stats_path.read_text())
-        except Exception:
-            pass
-    stats["messages"] = stats.get("messages", 0) + 1
-    stats_path.write_text(json.dumps(stats))
+    data = load_users_data()
+    uid = str(message.author.id)
+    if uid not in data:
+        data[uid] = {"messages": 0, "voice_seconds": 0, "games": [], "_voice_join_time": None}
+    data[uid]["messages"] = data[uid].get("messages", 0) + 1
+    save_users_data(data)
     await bot.process_commands(message)
 
 # Для учета времени в голосе требуется отдельная логика (on_voice_state_update)
