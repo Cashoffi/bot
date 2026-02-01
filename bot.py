@@ -90,58 +90,60 @@ def prune_old_games(games):
 @bot.event
 async def on_presence_update(before: discord.Member, after: discord.Member):
     # Сохраняем историю игр
-    user_id = after.id
-    history_path = get_history_path(user_id)
-    now_ts = datetime.now(UTC).timestamp()
-    history = []
-    if history_path.exists():
-        try:
-            history = json.loads(history_path.read_text())
-        except Exception:
-            history = []
-    # Добавляем текущие игры
-    current_games = set()
-    @bot.event
-    async def on_presence_update(before: discord.Member, after: discord.Member):
-        uid = str(after.id)
-        now_ts = datetime.now(UTC).timestamp()
-        data = load_games_data()
-        if uid not in data:
-            data[uid] = []
-        # Удаляем старые записи
-        data[uid] = prune_old_games(data[uid])
-        # Добавляем текущие игры
-        if after.activities:
-            for activity in after.activities:
-                if isinstance(activity, discord.Game):
-                    data[uid].append([activity.name, now_ts])
-        save_games_data(data)
 
-# Команда /activity для админов
-@bot.tree.command(name="activity", description="Показать игровую активность пользователей за неделю")
-async def activity(interaction: discord.Interaction):
-    # Проверка на роль/админа (можно заменить на свою логику)
-    allowed = False
-    if hasattr(interaction.user, 'roles'):
-        allowed = any(role.id in ALLOWED_ROLES_FOR_RESTART for role in interaction.user.roles)
-    if not allowed:
-        await interaction.response.send_message("У вас нет прав для этой команды!", ephemeral=True)
-        return
-    data = load_games_data()
-    lines = []
-    for uid, games in data.items():
-        # uid — строка, games — список [game_name, timestamp]
-        if not games:
-            continue
-        # Группируем по названию игры
-        game_counter = {}
-        for game, ts in games:
-            game_counter[game] = game_counter.get(game, 0) + 1
-        user = None
+    # ...все импорты...
+
+    intents = discord.Intents.default()
+    intents.message_content = True
+    intents.presences = True
+    intents.members = True
+    bot = commands.Bot(command_prefix='/', intents=intents)
+
+    import glob
+
+    # Команда для миграции старых файлов статистики в users_data.json
+    @bot.tree.command(name="migrate", description="Миграция старых файлов статистики в users_data.json (только для админов)")
+    async def migrate_command(interaction: discord.Interaction):
+        # Проверка на роль-админа
+        allowed = False
+        if hasattr(interaction.user, 'roles'):
+            allowed = any(role.id in ALLOWED_ROLES_FOR_RESTART for role in interaction.user.roles)
+        if not allowed:
+            await interaction.response.send_message("У вас нет прав для этой команды!", ephemeral=True)
+            return
+
+        users_data = {}
+
+        # Миграция сообщений и войса
+        for path in glob.glob("userstats_*.json"):
+            try:
+                uid = path.split("_")[1].split(".")[0]
+                with open(path, "r", encoding="utf-8") as f:
+                    stats = json.load(f)
+                users_data.setdefault(uid, {"messages": 0, "voice_seconds": 0, "games": [], "_voice_join_time": None})
+                users_data[uid]["messages"] = stats.get("messages", 0)
+                users_data[uid]["voice_seconds"] = stats.get("voice_seconds", 0)
+            except Exception as e:
+                print(f"Ошибка миграции {path}: {e}")
+
+        # Миграция истории игр
+        for path in glob.glob("gamehistory_*.json"):
+            try:
+                uid = path.split("_")[1].split(".")[0]
+                with open(path, "r", encoding="utf-8") as f:
+                    games = json.load(f)
+                users_data.setdefault(uid, {"messages": 0, "voice_seconds": 0, "games": [], "_voice_join_time": None})
+                users_data[uid]["games"] = games
+            except Exception as e:
+                print(f"Ошибка миграции {path}: {e}")
+
+        # Сохраняем итоговый файл
         try:
-            user = await interaction.guild.fetch_member(int(uid))
-        except Exception:
-            pass
+            with open("users_data.json", "w", encoding="utf-8") as f:
+                json.dump(users_data, f, ensure_ascii=False, indent=2)
+            await interaction.response.send_message("Миграция завершена успешно! users_data.json создан.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"Ошибка сохранения users_data.json: {e}", ephemeral=True)
         uname = user.display_name if user else f"ID {uid}"
         games_str = ", ".join(f"{g}: {c}" for g, c in game_counter.items())
         lines.append(f"{uname}: {games_str}")
