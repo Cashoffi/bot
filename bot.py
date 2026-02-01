@@ -1,4 +1,17 @@
 import glob
+import discord
+from discord import app_commands
+from discord.ext import commands
+import json
+import os
+from pathlib import Path
+from datetime import datetime, timedelta, UTC
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.presences = True  # Важно для отслеживания активности
+intents.members = True    # Нужно для работы с ролями
+bot = commands.Bot(command_prefix='/', intents=intents)
 
 # Команда для миграции старых файлов статистики в users_data.json
 @bot.tree.command(name="migrate", description="Миграция старых файлов статистики в users_data.json (только для админов)")
