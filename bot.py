@@ -1,3 +1,48 @@
+import glob
+
+# Команда для миграции старых файлов статистики в users_data.json
+@bot.tree.command(name="migrate", description="Миграция старых файлов статистики в users_data.json (только для админов)")
+async def migrate_command(interaction: discord.Interaction):
+    # Проверка на роль-админа
+    allowed = False
+    if hasattr(interaction.user, 'roles'):
+        allowed = any(role.id in ALLOWED_ROLES_FOR_RESTART for role in interaction.user.roles)
+    if not allowed:
+        await interaction.response.send_message("У вас нет прав для этой команды!", ephemeral=True)
+        return
+
+    users_data = {}
+
+    # Миграция сообщений и войса
+    for path in glob.glob("userstats_*.json"):
+        try:
+            uid = path.split("_")[1].split(".")[0]
+            with open(path, "r", encoding="utf-8") as f:
+                stats = json.load(f)
+            users_data.setdefault(uid, {"messages": 0, "voice_seconds": 0, "games": [], "_voice_join_time": None})
+            users_data[uid]["messages"] = stats.get("messages", 0)
+            users_data[uid]["voice_seconds"] = stats.get("voice_seconds", 0)
+        except Exception as e:
+            print(f"Ошибка миграции {path}: {e}")
+
+    # Миграция истории игр
+    for path in glob.glob("gamehistory_*.json"):
+        try:
+            uid = path.split("_")[1].split(".")[0]
+            with open(path, "r", encoding="utf-8") as f:
+                games = json.load(f)
+            users_data.setdefault(uid, {"messages": 0, "voice_seconds": 0, "games": [], "_voice_join_time": None})
+            users_data[uid]["games"] = games
+        except Exception as e:
+            print(f"Ошибка миграции {path}: {e}")
+
+    # Сохраняем итоговый файл
+    try:
+        with open("users_data.json", "w", encoding="utf-8") as f:
+            json.dump(users_data, f, ensure_ascii=False, indent=2)
+        await interaction.response.send_message("Миграция завершена успешно! users_data.json создан.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"Ошибка сохранения users_data.json: {e}", ephemeral=True)
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -14,21 +59,33 @@ intents.members = True    # Нужно для работы с ролями
 bot = commands.Bot(command_prefix='/', intents=intents)
 
 
+
 # === Настройки для отслеживания активности ===
 GAME_ROLE_MAP = {
     "Dota 2": 1463643348345819381,
     "Counter-Strike 2": 1463646558493868042,
 }
 ALLOWED_GAMES = set(GAME_ROLE_MAP.keys())
-IMMUTABLE_ROLE_IDS = set()  # Можно добавить GUILD_ID и другие важные роли
 HISTORY_DAYS = 7
+GAMES_DATA_PATH = Path("games_data.json")
 
-def get_history_path(user_id):
-    return Path(f"gamehistory_{user_id}.json")
+def load_games_data():
+    if GAMES_DATA_PATH.exists():
+        try:
+            return json.loads(GAMES_DATA_PATH.read_text())
+        except Exception:
+            return {}
+    return {}
 
-def prune_old_history(history):
+def save_games_data(data):
+    try:
+        GAMES_DATA_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print(f"[games_data] Ошибка записи: {e}")
+
+def prune_old_games(games):
     now = datetime.now(UTC).timestamp()
-    return [entry for entry in history if now - entry[1] <= HISTORY_DAYS * 86400]
+    return [entry for entry in games if now - entry[1] <= HISTORY_DAYS * 86400]
 
 @bot.event
 async def on_presence_update(before: discord.Member, after: discord.Member):
@@ -44,55 +101,53 @@ async def on_presence_update(before: discord.Member, after: discord.Member):
             history = []
     # Добавляем текущие игры
     current_games = set()
-    if after.activities:
-        for activity in after.activities:
-            if isinstance(activity, discord.Game):
-                current_games.add(activity.name)
-                # Записываем только если новая игра
-                if not any(entry[0] == activity.name for entry in history):
-                    history.append([activity.name, now_ts])
-    # Очищаем старое
-    history = prune_old_history(history)
-    # Сохраняем историю
-    try:
-        history_path.write_text(json.dumps(history))
-    except Exception as e:
-        print(f"[on_presence_update] Ошибка записи истории: {e}")
+    @bot.event
+    async def on_presence_update(before: discord.Member, after: discord.Member):
+        uid = str(after.id)
+        now_ts = datetime.now(UTC).timestamp()
+        data = load_games_data()
+        if uid not in data:
+            data[uid] = []
+        # Удаляем старые записи
+        data[uid] = prune_old_games(data[uid])
+        # Добавляем текущие игры
+        if after.activities:
+            for activity in after.activities:
+                if isinstance(activity, discord.Game):
+                    data[uid].append([activity.name, now_ts])
+        save_games_data(data)
 
-    # Проверяем, запускал ли пользователь только разрешённые игры за неделю
-    games_last_week = {entry[0] for entry in history}
-    if not games_last_week.issubset(ALLOWED_GAMES):
-        return  # Были другие игры — ничего не делаем
-
-    # Если сейчас запущена одна из целевых игр — выдаём роль
-    for game_name, role_id in GAME_ROLE_MAP.items():
-        if game_name in current_games:
-            guild = after.guild
-            if not guild:
-                return
-            role = guild.get_role(role_id)
-            if not role:
-                try:
-                    role = await guild.fetch_role(role_id)
-                except Exception:
-                    return
-            # Снимаем все роли, кроме IMMUTABLE_ROLE_IDS и нужной
-            roles_to_remove = [r for r in after.roles if r.id not in IMMUTABLE_ROLE_IDS and r != role]
-            try:
-                if roles_to_remove:
-                    await after.remove_roles(*roles_to_remove, reason=f"Запущена игра {game_name}")
-                if role not in after.roles:
-                    await after.add_roles(role, reason=f"Запущена игра {game_name}")
-            except Exception as e:
-                print(f"[on_presence_update] Ошибка при изменении ролей: {e}")
-            break
-
-GUILD_ID = 1463456630833287304
-# Разрешённые каналы для команд
-ALLOWED_CHANNELS = {1463798624612909097, 1463798810047152178}
-# ID ролей, которым разрешён рестарт
-ALLOWED_ROLES_FOR_RESTART = {1463540497535602833, 1463502977355743381}  # замените на реальные ID ролей
-
+# Команда /activity для админов
+@bot.tree.command(name="activity", description="Показать игровую активность пользователей за неделю")
+async def activity(interaction: discord.Interaction):
+    # Проверка на роль/админа (можно заменить на свою логику)
+    allowed = False
+    if hasattr(interaction.user, 'roles'):
+        allowed = any(role.id in ALLOWED_ROLES_FOR_RESTART for role in interaction.user.roles)
+    if not allowed:
+        await interaction.response.send_message("У вас нет прав для этой команды!", ephemeral=True)
+        return
+    data = load_games_data()
+    lines = []
+    for uid, games in data.items():
+        # uid — строка, games — список [game_name, timestamp]
+        if not games:
+            continue
+        # Группируем по названию игры
+        game_counter = {}
+        for game, ts in games:
+            game_counter[game] = game_counter.get(game, 0) + 1
+        user = None
+        try:
+            user = await interaction.guild.fetch_member(int(uid))
+        except Exception:
+            pass
+        uname = user.display_name if user else f"ID {uid}"
+        games_str = ", ".join(f"{g}: {c}" for g, c in game_counter.items())
+        lines.append(f"{uname}: {games_str}")
+    if not lines:
+        lines = ["Нет данных за неделю."]
+    await interaction.response.send_message("Активность за неделю:\n" + "\n".join(lines), ephemeral=True)
 async def user_has_allowed_role(user: discord.abc.Snowflake, guild: discord.Guild | None = None) -> bool:
     """Проверяет, есть ли у пользователя хотя бы одна из разрешённых ролей.
     Принимает `interaction.user` (User или Member). Если нужно, подгружает Member из guild.
